@@ -1,0 +1,277 @@
+<!doctype html>
+<!--
+  ============================================================
+  WMS Scanner externo — para hostear en GitHub Pages
+  ============================================================
+  Este archivo se ejecuta FUERA de Apps Script para evitar la
+  restricción de Permissions Policy del iframe sandbox de GAS.
+
+  Cómo desplegarlo (5 minutos):
+  ------------------------------------------------------------
+  1. Crea un repo en GitHub (público), ej: wms-scanner
+  2. Sube este archivo como index.html (renómbralo)
+  3. Settings → Pages → Source: main branch → /(root) → Save
+  4. Espera 1 min y copia la URL: https://USUARIO.github.io/wms-scanner/
+  5. En el WMS, abre el escáner (📷), clic en "🎥 Cámara en vivo
+     (configurar)" y pega la URL. Solo el admin puede guardarla.
+
+  Cómo funciona:
+  ------------------------------------------------------------
+  · El WMS abre este HTML en window.open(...) — ventana popup.
+  · Esta página corre top-level en github.io (no iframe), así que
+    getUserMedia() funciona y la cámara enciende.
+  · Cuando detecta un código, hace:
+      window.opener.postMessage({type:'wms-scan-result', code:'...'}, '*')
+    y se cierra sola.
+  · El WMS escucha postMessage y procesa el código.
+
+  Sin opener (alguien la abre directo): muestra el código en pantalla
+  con botón "Copiar".
+  ============================================================
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>WMS Scanner</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:#0b0f1a;color:#e6e9ef;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;overflow:hidden}
+  body{display:flex;flex-direction:column}
+
+  header{flex:0 0 auto;padding:10px 14px;background:rgba(0,0,0,.5);display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #1f2330}
+  header h1{font-size:14px;font-weight:600}
+  header .close{background:transparent;border:1px solid #2a2f3d;color:#e6e9ef;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px}
+  header .close:hover{background:#2a2f3d}
+
+  #stage{flex:1;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center}
+  #stage video{width:100%;height:100%;object-fit:cover;background:#000}
+  #aim{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:65%;max-width:280px;aspect-ratio:1;border:3px solid #9d5ffc;border-radius:18px;box-shadow:0 0 0 9999px rgba(0,0,0,.32) inset;pointer-events:none}
+  #aim::before,#aim::after{content:'';position:absolute;width:30px;height:30px;border-color:#9d5ffc;border-style:solid;border-width:0}
+  #aim::before{left:-3px;top:-3px;border-top-width:5px;border-left-width:5px;border-radius:18px 0 0 0}
+  #aim::after{right:-3px;bottom:-3px;border-bottom-width:5px;border-right-width:5px;border-radius:0 0 18px 0}
+
+  #status{position:absolute;top:14px;left:50%;transform:translateX(-50%);padding:6px 14px;background:rgba(0,0,0,.75);border:1px solid #2a2f3d;border-radius:6px;font-size:13px;max-width:90%;text-align:center}
+  #status.ok{border-color:#10b981;color:#10b981}
+  #status.err{border-color:#ef4444;color:#fca5a5;background:rgba(40,8,8,.95)}
+
+  #result{position:absolute;left:14px;right:14px;bottom:14px;padding:14px;background:rgba(16,185,129,.18);border:2px solid #10b981;border-radius:10px;display:none}
+  #result.show{display:block}
+  #result .lbl{font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
+  #result .code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;font-weight:700;word-break:break-all;max-height:120px;overflow:auto;background:rgba(0,0,0,.3);padding:8px;border-radius:6px}
+  #result .actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+  #result button{flex:1;padding:8px 12px;border:1px solid #10b981;background:#10b981;color:#0b0f1a;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px}
+  #result button.alt{background:transparent;color:#10b981}
+
+  footer{flex:0 0 auto;padding:10px 14px;background:rgba(0,0,0,.5);border-top:1px solid #1f2330;display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#94a3b8}
+  footer .hint{flex:1}
+  footer button{background:#2a2f3d;border:none;color:#e6e9ef;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:11px}
+  footer button:hover{background:#3a3f4d}
+</style>
+</head>
+<body>
+  <header>
+    <h1>📷 WMS Scanner</h1>
+    <button class="close" onclick="cerrar()">✕ Cerrar</button>
+  </header>
+
+  <div id="stage">
+    <video id="v" autoplay muted playsinline></video>
+    <div id="aim"></div>
+    <div id="status">Inicializando cámara…</div>
+
+    <div id="result">
+      <div class="lbl">✓ Código detectado</div>
+      <div class="code" id="resCode"></div>
+      <div class="actions">
+        <button onclick="enviarYCerrar()">📤 Enviar al WMS y cerrar</button>
+        <button class="alt" onclick="copiar()">📋 Copiar</button>
+        <button class="alt" onclick="reiniciar()">🔄 Otro</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <span class="hint" id="hint">Apunta al QR o código de barras</span>
+    <button onclick="toggleCam()">🔄 Cambiar cámara</button>
+  </footer>
+
+  <!-- jsQR como fallback si BarcodeDetector no existe -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script>
+  (function(){
+    'use strict';
+
+    var v       = document.getElementById('v');
+    var status  = document.getElementById('status');
+    var result  = document.getElementById('result');
+    var resCode = document.getElementById('resCode');
+    var hint    = document.getElementById('hint');
+    var stream  = null;
+    var detector= null;
+    var raf     = null;
+    var lastCode= '';
+    var lastTs  = 0;
+    var facing  = 'environment';
+    var canvas  = document.createElement('canvas');
+    var ctx     = canvas.getContext('2d');
+    var detectedCode = '';
+
+    function setStatus(msg, kind){
+      status.textContent = msg;
+      status.className = kind || '';
+    }
+
+    function start(){
+      // Detector nativo si existe (mejor: detecta QR y barcodes 1D)
+      if (typeof BarcodeDetector !== 'undefined') {
+        try {
+          detector = new BarcodeDetector({
+            formats: ['qr_code','code_128','code_39','ean_13','ean_8','itf','codabar','upc_a','upc_e']
+          });
+        } catch(e){ detector = null; }
+      }
+      if (!detector && typeof jsQR !== 'function') {
+        setStatus('⚠ Sin BarcodeDetector ni jsQR. No se pueden leer códigos.','err');
+        return;
+      }
+
+      var constraints = { video:{ facingMode:{ ideal: facing }, width:{ ideal:1280 }, height:{ ideal:720 } }, audio:false };
+      navigator.mediaDevices.getUserMedia(constraints)
+        .then(function(s){
+          stream = s;
+          v.srcObject = s;
+          v.onloadedmetadata = function(){
+            v.play().then(function(){
+              setStatus('🔍 Apunta al código', 'ok');
+              hint.textContent = detector ? 'QR + barcode (CODE128, EAN, etc.)' : 'Solo QR (jsQR)';
+              loop();
+            }).catch(function(){
+              setStatus('▶ Toca el video','err');
+              v.addEventListener('click', function once(){
+                v.removeEventListener('click', once);
+                v.play();
+              });
+            });
+          };
+        })
+        .catch(function(err){
+          var msg;
+          if (err.name === 'NotAllowedError') msg = '🚫 Permiso denegado. Recarga y permite cámara.';
+          else if (err.name === 'NotFoundError') msg = '🚫 Sin cámara en este dispositivo.';
+          else if (err.name === 'NotReadableError') msg = '🚫 Cámara en uso por otra app.';
+          else msg = '⚠ ' + (err.message || err.name);
+          setStatus(msg, 'err');
+        });
+    }
+
+    function stop(){
+      if (raf) { cancelAnimationFrame(raf); raf = null; }
+      if (stream) { stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; }
+    }
+
+    function loop(){
+      if (!stream) return;
+      // Vía A: BarcodeDetector nativo (recomendado en Chrome móvil Android)
+      if (detector) {
+        detector.detect(v).then(function(codes){
+          if (codes && codes.length) handle(codes[0].rawValue);
+        }).catch(function(){});
+      } else if (typeof jsQR === 'function' && v.videoWidth) {
+        // Vía B: jsQR sobre canvas (fallback, solo QR)
+        canvas.width = v.videoWidth;
+        canvas.height = v.videoHeight;
+        ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+        var img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        var qr = jsQR(img.data, canvas.width, canvas.height);
+        if (qr && qr.data) handle(qr.data);
+      }
+      raf = requestAnimationFrame(loop);
+    }
+
+    function handle(raw){
+      var code = String(raw || '').trim();
+      var now = Date.now();
+      if (!code) return;
+      if (code === lastCode && (now - lastTs) < 2500) return;
+      lastCode = code;
+      lastTs   = now;
+      mostrarResultado(code);
+    }
+
+    function mostrarResultado(code){
+      detectedCode = code;
+      resCode.textContent = code;
+      result.classList.add('show');
+      setStatus('✓ Detectado', 'ok');
+      // Vibración táctil si disponible
+      if (navigator.vibrate) { try { navigator.vibrate(80); } catch(e){} }
+    }
+
+    function reiniciar(){
+      detectedCode = '';
+      result.classList.remove('show');
+      lastCode = '';
+      lastTs = 0;
+      setStatus('🔍 Apunta al código', 'ok');
+    }
+
+    function enviarYCerrar(){
+      if (!detectedCode) return;
+      if (window.opener && !window.opener.closed) {
+        try {
+          window.opener.postMessage({ type:'wms-scan-result', code: detectedCode }, '*');
+        } catch(e) {
+          alert('No se pudo enviar al WMS: ' + e.message);
+          return;
+        }
+      }
+      stop();
+      window.close();
+    }
+
+    function copiar(){
+      if (!detectedCode) return;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(detectedCode).then(function(){
+          setStatus('📋 Copiado al portapapeles', 'ok');
+        }).catch(function(){ fallbackCopy(); });
+      } else fallbackCopy();
+    }
+    function fallbackCopy(){
+      var ta = document.createElement('textarea');
+      ta.value = detectedCode;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); setStatus('📋 Copiado','ok'); } catch(e){}
+      document.body.removeChild(ta);
+    }
+
+    function cerrar(){
+      stop();
+      window.close();
+    }
+
+    function toggleCam(){
+      facing = (facing === 'environment') ? 'user' : 'environment';
+      stop();
+      reiniciar();
+      start();
+    }
+
+    // Exponer al alcance global para los onclick del HTML
+    window.cerrar          = cerrar;
+    window.enviarYCerrar   = enviarYCerrar;
+    window.copiar          = copiar;
+    window.reiniciar       = reiniciar;
+    window.toggleCam       = toggleCam;
+
+    // Limpieza al cerrar
+    window.addEventListener('beforeunload', stop);
+
+    // Arrancar
+    start();
+  })();
+  </script>
+</body>
+</html>
