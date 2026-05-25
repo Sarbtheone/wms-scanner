@@ -93,7 +93,8 @@
 
   <footer>
     <span class="hint" id="hint">Apunta al QR o código de barras</span>
-    <button onclick="toggleCam()">🔄 Cambiar cámara</button>
+    <button id="autoBtn" onclick="toggleAuto()" title="Si está activado, al detectar un código se envía al WMS automáticamente">⏸ Pausar auto-envío</button>
+    <button onclick="toggleCam()" style="margin-left:6px">🔄 Cambiar cámara</button>
   </footer>
 
   <!-- jsQR como fallback si BarcodeDetector no existe -->
@@ -189,6 +190,8 @@
       raf = requestAnimationFrame(loop);
     }
 
+    var autoEnviar = true; // por defecto, auto-envía al detectar
+
     function handle(raw){
       var code = String(raw || '').trim();
       var now = Date.now();
@@ -197,6 +200,23 @@
       lastCode = code;
       lastTs   = now;
       mostrarResultado(code);
+
+      // Auto-envío: si está habilitado y hay opener, envía y cierra automáticamente
+      if (autoEnviar && window.opener && !window.opener.closed) {
+        setStatus('✓ Detectado · enviando al WMS…', 'ok');
+        // Pequeño delay para que se vea la confirmación visual + asegurar postMessage llegue
+        setTimeout(function(){
+          try {
+            window.opener.postMessage({ type:'wms-scan-result', code: detectedCode }, '*');
+          } catch(e) {
+            setStatus('Error al enviar: ' + e.message, 'err');
+            return;
+          }
+          stop();
+          // Doble tick antes de cerrar para garantizar entrega del postMessage
+          setTimeout(function(){ window.close(); }, 100);
+        }, 300);
+      }
     }
 
     function mostrarResultado(code){
@@ -206,6 +226,12 @@
       setStatus('✓ Detectado', 'ok');
       // Vibración táctil si disponible
       if (navigator.vibrate) { try { navigator.vibrate(80); } catch(e){} }
+    }
+
+    function toggleAuto(){
+      autoEnviar = !autoEnviar;
+      var btn = document.getElementById('autoBtn');
+      if (btn) btn.textContent = autoEnviar ? '⏸ Pausar auto-envío' : '▶ Reanudar auto-envío';
     }
 
     function reiniciar(){
@@ -265,6 +291,7 @@
     window.copiar          = copiar;
     window.reiniciar       = reiniciar;
     window.toggleCam       = toggleCam;
+    window.toggleAuto      = toggleAuto;
 
     // Limpieza al cerrar
     window.addEventListener('beforeunload', stop);
